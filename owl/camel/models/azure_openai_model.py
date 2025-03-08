@@ -62,6 +62,7 @@ class AzureOpenAIModel(BaseModelBackend):
         token_counter: Optional[BaseTokenCounter] = None,
         api_version: Optional[str] = None,
         azure_deployment_name: Optional[str] = None,
+        tools: Optional[List[Dict[str, Any]]] = None,
     ) -> None:
         if model_config_dict is None:
             model_config_dict = ChatGPTConfig().as_dict()
@@ -85,6 +86,9 @@ class AzureOpenAIModel(BaseModelBackend):
                 "Must provide either the `azure_deployment_name` argument "
                 "or `AZURE_DEPLOYMENT_NAME` environment variable."
             )
+            
+        # 存储工具定义
+        self.tools = tools
 
         self._client = AzureOpenAI(
             azure_endpoint=str(self._url),
@@ -111,6 +115,8 @@ class AzureOpenAIModel(BaseModelBackend):
     def run(
         self,
         messages: List[OpenAIMessage],
+        tools: Optional[List[Dict[str, Any]]] = None,
+        tool_choice: Optional[str] = None,
     ) -> Union[ChatCompletion, Stream[ChatCompletionChunk]]:
         r"""Runs inference of Azure OpenAI chat completion.
 
@@ -123,11 +129,21 @@ class AzureOpenAIModel(BaseModelBackend):
                 `ChatCompletion` in the non-stream mode, or
                 `Stream[ChatCompletionChunk]` in the stream mode.
         """
-        response = self._client.chat.completions.create(
-            messages=messages,
-            model=self.azure_deployment_name,  # type:ignore[arg-type]
+        # 准备API调用参数
+        api_params = {
+            "messages": messages,
+            "model": self.azure_deployment_name,  # type:ignore[arg-type]
             **self.model_config_dict,
-        )
+        }
+        
+        # 添加工具参数（如果有）
+        tools_to_use = tools if tools is not None else self.tools
+        if tools_to_use:
+            api_params["tools"] = tools_to_use
+            api_params["tool_choice"] = tool_choice or "auto"
+        
+        # 调用API
+        response = self._client.chat.completions.create(**api_params)
         return response
 
     def check_model_config(self):
@@ -138,8 +154,12 @@ class AzureOpenAIModel(BaseModelBackend):
             ValueError: If the model configuration dictionary contains any
                 unexpected arguments to Azure OpenAI API.
         """
+        # OPENAI_API_PARAMS 是一个集合，需要正确处理
+        allowed_params = set(OPENAI_API_PARAMS)  # 创建一个副本
+        allowed_params.update(["tools", "tool_choice"])  # 添加额外的参数
+        
         for param in self.model_config_dict:
-            if param not in OPENAI_API_PARAMS:
+            if param not in allowed_params:
                 raise ValueError(
                     f"Unexpected argument `{param}` is "
                     "input into Azure OpenAI model backend."
