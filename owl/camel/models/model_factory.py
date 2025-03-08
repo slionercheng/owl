@@ -53,6 +53,7 @@ class ModelFactory:
         token_counter: Optional[BaseTokenCounter] = None,
         api_key: Optional[str] = None,
         url: Optional[str] = None,
+        tools: Optional[list] = None,
     ) -> BaseModelBackend:
         r"""Creates an instance of `BaseModelBackend` of the specified type.
 
@@ -72,6 +73,8 @@ class ModelFactory:
                 with the model service. (default: :obj:`None`)
             url (Optional[str], optional): The url to the model service.
                 (default: :obj:`None`)
+            tools (Optional[list], optional): List of tools to be used by the model.
+                Currently only supported for AzureOpenAIModel. (default: :obj:`None`)
 
         Returns:
             BaseModelBackend: The initialized backend.
@@ -129,10 +132,21 @@ class ModelFactory:
                 f"Unknown pair of model platform `{model_platform}` "
                 f"and model type `{model_type}`."
             )
-        return model_class(
-            model_type=model_type,
-            model_config_dict=model_config_dict,
-            api_key=api_key,
-            url=url,
-            token_counter=token_counter,
-        )
+        # 如果是 AzureOpenAIModel 并且提供了 tools，则传递 tools 参数
+        if model_class == AzureOpenAIModel and tools is not None:
+            return model_class(
+                model_type=model_type,
+                model_config_dict=model_config_dict,
+                api_key=api_key,
+                url=url,
+                token_counter=token_counter,
+                tools=tools,
+            )
+        else:
+            return model_class(
+                model_type=model_type,
+                model_config_dict=model_config_dict,
+                api_key=api_key,
+                url=url,
+                token_counter=token_counter,
+            )

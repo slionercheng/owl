@@ -32,13 +32,13 @@ def construct_society(question: str) -> OwlRolePlaying:
     assistant_role_name = "assistant"
     
     user_model = ModelFactory.create(
-        model_platform=ModelPlatformType.OPENAI,
+        model_platform=ModelPlatformType.AZURE,
         model_type=ModelType.GPT_4O,
         model_config_dict=ChatGPTConfig(temperature=0, top_p=1).as_dict(), # [Optional] the config for model
     )
 
     assistant_model = ModelFactory.create(
-        model_platform=ModelPlatformType.OPENAI,
+        model_platform=ModelPlatformType.AZURE,
         model_type=ModelType.GPT_4O,
         model_config_dict=ChatGPTConfig(temperature=0, top_p=1).as_dict(), # [Optional] the config for model
     )
@@ -81,7 +81,7 @@ def construct_society(question: str) -> OwlRolePlaying:
 
 
 # Example case
-question = "What was the volume in m^3 of the fish bag that was calculated in the University of Leicester paper `Can Hiccup Supply Enough Fish to Maintain a Dragon’s Diet?` "
+question = "帮我了解下苹果手机最新款价格"
 
 society = construct_society(question)
 answer, chat_history, token_count = run_society(society)
