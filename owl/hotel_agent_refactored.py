@@ -242,42 +242,7 @@ async def process_user_input(user_input: str, task_type: str = "general") -> Dic
         add_progress_step('fetch_initial_url', '获取搜索智能体描述', 'in-progress', {'url': initial_url})
         
         # 获取初始URL内容
-        # initial_content = await fetch_url_content(initial_url)
-        initial_content = {
-            "content_type": "text/plain",
-            "text_content": """{
-                "@context":
-                    {"@vocab":"https://schema.org/",
-                    "did":"https://w3id.org/did#",
-                    "ad":"https://agent-network-protocol.com/ad#"},
-                    "@type":"ad:AgentDescription",
-                    "@id":"https://agent-search.ai/ad.json",
-                    "name":"搜索智能体",
-                    "did":"did:wba:agent-did.com:search",
-                    "owner":{"@type":"Organization",
-                    "name":"agent-search.ai",
-                    "@id":"https://agent-search.ai"},
-                    "description":"搜索智能体，提供酒店、门票、机票等智能体的搜索服务，可以调用结构化的API接口或者自然语言接口。建议优先调用结构化API接口。",
-                    "version":"1.0.0",
-                    "created":"2025-03-08T14:47:06.877617Z",
-                    "ad:securityDefinitions":{"didwba_sc":{"scheme":"didwba","in":"header","name":"Authorization"}},
-                    "ad:security":"didwba_sc",
-                    "ad:interfaces":[
-                        {
-                            "@type":"ad:NaturalLanguageInterface","protocol":"YAML","url":"https://agent-search.ai/api_files/nl-interface.yaml",
-                            "description":"提供自然语言交互接口的OpenAPI的YAML文件，可以通过次接口与智能体进行自然语言交互."
-                        },
-                        {
-                            "@type":"ad:StructuredInterface",
-                            "protocol":"YAML",
-                            "url":"https://agent-search.ai/api_files/hotel-search-interface.yaml",
-                            "description":"提供酒店搜索的结构化接口，返回符合条件的酒店列表信息."
-                        }
-                    ]
-                }
-            """,
-            "url": initial_url
-        }
+        initial_content = await fetch_url_content(initial_url)
         visited_urls.add(initial_url)
         update_progress('fetch_initial_url', 'completed')
         
