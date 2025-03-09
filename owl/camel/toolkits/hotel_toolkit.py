@@ -25,6 +25,106 @@ from camel.models import BaseModelBackend
 from camel.agents import ChatAgent
 from camel.models import ModelFactory
 from camel.types import ModelType, ModelPlatformType
+from typing import Optional, Dict, Any, List, Union
+import os
+import json
+import logging
+import aiohttp
+import asyncio
+import time
+import traceback
+import uuid
+from pathlib import Path
+from openai import AzureOpenAI
+from dotenv import load_dotenv
+from utils.log_base import set_log_color_level
+
+# Get the absolute path to the root directory
+ROOT_DIR = Path(__file__).resolve().parent
+
+
+# Load environment variables
+load_dotenv(ROOT_DIR / ".env")
+
+SEARCH_AGENT_PROMPT_TEMPLATE = """
+你是一个通用智能网络数据探索工具。你的目标是通过递归访问各种格式的数据（包括JSON-LD、YAML等），找到用户需要的信息、API，以完成指定的任务。
+
+## 当前任务
+{task_description}
+
+## 重要说明
+1. 你将收到一个起始URL({initial_url})，这是一个搜索智能体的描述文件
+2. 你需要理解这个搜索智能体的结构、功能和API用法
+3. 你需要像网络爬虫一样，不断从中发现并访问新的URL和API端点
+4. 你可以使用fetch_url工具来获取任何URL的内容
+5. 该工具可以处理多种格式的响应，包括：
+   - JSON格式：将直接解析为JSON对象
+   - YAML格式：将返回文本内容，你需要分析其结构
+   - 其他文本格式：将返回原始文本内容
+6. 阅读每个文档，寻找与任务相关的信息或API端点
+7. 你需要自己决定爬取路径，不要等待用户指示
+
+## 爬取策略
+1. 首先获取初始URL内容，理解搜索智能体的结构和API
+2. 识别文档中的所有URL和链接，特别是serviceEndpoint、url、@id等字段
+3. 分析API文档，理解API的使用方法、参数和返回值
+4. 根据API文档，构造合适的请求找到所需信息
+5. 记录你访问过的所有URL，避免重复爬取
+6. 总结发现的所有相关信息，提供详细的建议
+
+## 工作流程
+1. 获取起始URL内容，理解搜索智能体的功能
+2. 分析内容，找出所有可能的链接和API文档
+3. 解析API文档，理解API的使用方法
+4. 根据任务需求，构造请求获取所需信息
+5. 继续探索相关链接，直到找到足够的信息
+6. 总结信息，提供最适合用户的建议
+
+## JSON-LD数据解析提示
+1. 注意@context字段，它定义了数据的语义上下文
+2. @type字段表示实体类型，帮助你理解数据的含义
+3. @id字段通常是一个可以进一步访问的URL
+4. 寻找serviceEndpoint、url等字段，它们通常指向API或更多数据
+
+提供详细信息和清晰解释，让用户理解你找到的信息和你的推荐理由。
+"""
+
+# 定义初始URL
+initial_url = "https://agent-search.ai/ad.json"
+
+# 定义可用的工具
+AVAILABLE_TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "fetch_url",
+            "description": "Fetch content from a URL, supporting various formats like JSON, YAML, and plain text",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {
+                        "type": "string",
+                        "description": "URL to fetch content from"
+                    },
+                    "method": {
+                        "type": "string",
+                        "description": "HTTP method to use (GET or POST)",
+                        "enum": ["GET", "POST"]
+                    },
+                    "data": {
+                        "type": "object",
+                        "description": "Data to send in the request body (for POST requests)"
+                    },
+                    "headers": {
+                        "type": "object",
+                        "description": "Additional headers to send with the request"
+                    }
+                },
+                "required": ["url"]
+            }
+        }
+    }
+]
 
 
 class HotelToolkit(BaseToolkit):
@@ -44,318 +144,270 @@ class HotelToolkit(BaseToolkit):
 
     ) -> None:
         self.model = model
+        self.progress_list = []
+        self.visited_urls = set()
+        
+        # 初始化 Azure OpenAI 客户端
+        self.client = AzureOpenAI(
+            api_key=os.getenv("AZURE_OPENAI_API_KEY"),
+            api_version=os.getenv("AZURE_OPENAI_API_VERSION"),
+            azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"),
+            azure_deployment=os.getenv("AZURE_OPENAI_DEPLOYMENT"),
+        )
 
-    
-    
-    def enhance_hotel_search_with_model(self, location: str, user_preferences: str) -> Dict[str, Any]:
-        r"""Use the model to enhance hotel search based on natural language preferences.
-        
-        Args:
-            location (str): The location to search for hotels.
-            user_preferences (str): Natural language description of user preferences.
-            
-        Returns:
-            Dict[str, Any]: A dictionary of search parameters extracted from user preferences.
-        """
-        if not self.model:
-            # Return default parameters if no model is available
-            return {}
-            
-        prompt_content = f"""Extract hotel search parameters from the following user preferences for {location}:
-        
-        User preferences: {user_preferences}
-        
-        Extract and return ONLY the following parameters as a JSON object:
-        - price_min (integer or null): Minimum price per night
-        - price_max (integer or null): Maximum price per night
-        - rating_min (float or null): Minimum hotel rating (1-5)
-        - amenities (string or null): Comma-separated list of desired amenities
-        - guests (integer): Number of guests (default to 2 if not specified)
-        - check_in_date (string or null): Check-in date in YYYY-MM-DD format if mentioned
-        - check_out_date (string or null): Check-out date in YYYY-MM-DD format if mentioned
-        
-        Return ONLY the JSON object without any additional text.
-        """
-        
-        # 创建OpenAI消息格式
-        messages = [
-            {"role": "system", "content": "You are a helpful assistant that extracts hotel search parameters from user preferences."},
-            {"role": "user", "content": prompt_content}
-        ]
-        
-        try:
-            response = self.model.run(messages)
-            logger.debug(f"Model response for hotel search enhancement: {response}")
-            
-            # 从响应中获取内容
-            response_content = response.choices[0].message.content if hasattr(response, 'choices') else response
-            
-            # Extract JSON from response
-            try:
-                # Try to parse the entire response as JSON
-                params = json.loads(response_content)
-                return params
-            except json.JSONDecodeError:
-                # If that fails, try to extract JSON from the text
-                import re
-                json_match = re.search(r'\{[\s\S]*\}', response_content)
-                if json_match:
-                    try:
-                        params = json.loads(json_match.group(0))
-                        return params
-                    except json.JSONDecodeError:
-                        logger.error("Failed to parse JSON from model response")
-                        return {}
-                else:
-                    logger.error("No JSON found in model response")
-                    return {}
-        except Exception as e:
-            logger.error(f"Error using model to enhance hotel search: {e}")
-            return {}
+    def add_progress_step(self, step_id: str, title: str, status: str = 'pending', details: Dict = None) -> Dict:
+        """添加一个新的处理步骤"""
+        step = {
+            'id': step_id,
+            'title': title,
+            'status': status,
+            'timestamp': time.time()
+        }
+        if details:
+            step['details'] = details
+        self.progress_list.append(step)
+        logging.info(f"Added progress step: {step}")
+        return step
 
-    def enhance_hotel_details_with_model(self, hotel_details: Dict[str, Any]) -> str:
-        r"""Use the model to enhance hotel details with additional insights and recommendations.
-        
-        Args:
-            hotel_details (Dict[str, Any]): Raw hotel details data.
-            
-        Returns:
-            str: Enhanced hotel description with insights and recommendations.
-        """
-        if not self.model:
-            return ""
-            
-        hotel_json = json.dumps(hotel_details, indent=2)
-        prompt_content = f"""Based on the following hotel information, provide a brief enhanced description with:
-        1. A summary of the key features and benefits of staying at this hotel
-        2. Who this hotel would be ideal for (business travelers, families, couples, etc.)
-        3. One or two nearby attractions or points of interest worth mentioning
-        
-        Hotel information:
-        {hotel_json}
-        
-        Provide your response in a concise paragraph format suitable for adding to a hotel description.
-        """
-        
-        # 创建OpenAI消息格式
-        messages = [
-            {"role": "system", "content": "You are a helpful assistant that provides information about hotels."},
-            {"role": "user", "content": prompt_content}
-        ]
-        
+    def update_progress(self, step_id: str, status: str) -> None:
+        """更新进度状态"""
+        for step in self.progress_list:
+            if step['id'] == step_id:
+                step['status'] = status
+                step['timestamp'] = time.time()
+                logging.info(f"Updated progress step {step_id} to {status}: {step}")
+                return
+
+    # 已删除 process_http_response 函数，因为它已经不再被使用，相关功能已整合到 fetch_url_content 函数中
+
+    def fetch_url_content(self, url: str, method: str = "GET", data: Dict = None, headers: Dict = None) -> Dict[str, Any]:
+        """获取URL内容"""
+        logging.info(f"Fetching document from URL: {url} with method: {method}")
         try:
-            response = self.model.run(messages)
-            logger.debug(f"Model response for hotel details enhancement: {response}")
+            request_kwargs = {}
+            if headers:
+                request_kwargs["headers"] = headers
+            if data and method == "POST":
+                request_kwargs["json"] = data
             
-            # 从响应中获取内容
-            response_content = response.choices[0].message.content if hasattr(response, 'choices') else response
-            return response_content
-        except Exception as e:
-            logger.error(f"Error using model to enhance hotel details: {e}")
-            return ""
-    
-    def recommend_room_with_model(self, hotel_id: str, guest_preferences: str) -> Dict[str, Any]:
-        r"""Use the model to recommend a room based on guest preferences.
-        
-        Args:
-            hotel_id (str): ID of the hotel to recommend a room for.
-            guest_preferences (str): Natural language description of guest preferences.
-            
-        Returns:
-            Dict[str, Any]: Recommended room details and explanation.
-        """
-        if not self.model:
-            return {"recommendation": "No model available for room recommendation."}
-        
-        # 在真实实现中，这里应该调用API获取房间信息
-        # 这里我们直接在提示中描述可能的房间类型
-        rooms_description = """
-        1. Standard Room: Comfortable room with a queen-sized bed, WiFi, TV, and air conditioning. Price: $100/night.
-        2. Deluxe Room: Spacious room with a king-sized bed and city view, WiFi, TV, air conditioning, mini bar, and bathtub. Price: $150/night.
-        3. Family Suite: Large suite with two bedrooms and a living area, WiFi, TV, air conditioning, kitchen, and washing machine. Price: $250/night.
-        """
-        
-        # 不使用mock数据，而是直接在提示中描述房间
-        prompt_content = f"""Based on the following room options and guest preferences, recommend the most suitable room:
-        
-        Hotel ID: {hotel_id}
-        Guest preferences: {guest_preferences}
-        
-        Available rooms:
-        {rooms_description}
-        
-        Return your recommendation as a JSON object with the following structure:
-        {{
-            "recommended_room_id": "ID of the recommended room (room1, room2, or room3)",
-            "recommended_room_name": "Name of the recommended room",
-            "explanation": "Explanation of why this room is recommended based on the guest preferences"
-        }}
-        
-        Return ONLY the JSON object without any additional text.
-        """
-        
-        # 创建OpenAI消息格式
-        messages = [
-            {"role": "system", "content": "You are a helpful assistant that provides hotel room recommendations based on guest preferences."},
-            {"role": "user", "content": prompt_content}
-        ]
-        
-        try:
-            response = self.model.run(messages)
-            logger.debug(f"Model response for room recommendation: {response}")
-            
-            # 从响应中获取内容
-            if hasattr(response, 'choices') and hasattr(response.choices[0].message, 'content') and response.choices[0].message.content is not None:
-                response_content = response.choices[0].message.content
-                
-                # 尝试解析JSON响应
-                try:
-                    # 尝试将整个响应解析为JSON
-                    recommendation = json.loads(response_content)
-                    return recommendation
-                except json.JSONDecodeError:
-                    # 如果失败，尝试从文本中提取JSON
-                    import re
-                    json_match = re.search(r'\{[\s\S]*\}', response_content)
-                    if json_match:
-                        try:
-                            recommendation = json.loads(json_match.group(0))
-                            return recommendation
-                        except json.JSONDecodeError:
-                            logger.error("Failed to parse JSON from model response")
-                            return {"error": "Failed to parse recommendation"}
-                    else:
-                        logger.error("No JSON found in model response")
-                        return {"error": "No recommendation found"}
-            elif hasattr(response, 'choices') and hasattr(response.choices[0].message, 'tool_calls') and response.choices[0].message.tool_calls:
-                # 处理工具调用情况
-                tool_calls = response.choices[0].message.tool_calls
-                logger.debug(f"Model returned tool calls: {tool_calls}")
-                
-                # 处理工具调用并收集结果
-                tool_results = self._handle_tool_calls(tool_calls, hotel_id, guest_preferences)
-                
-                # 基于工具调用结果生成推荐
-                if 'room_info' in tool_results:
-                    return {
-                        "recommended_room_id": tool_results.get('room_id', 'room2'),
-                        "recommended_room_name": tool_results.get('room_name', 'Deluxe Room'),
-                        "explanation": tool_results.get('explanation', "This room was selected based on your preferences."),
-                        "additional_info": tool_results.get('additional_info', {})
-                    }
-                else:
-                    # 如果没有有用的工具调用结果，返回默认推荐
-                    return {
-                        "recommended_room_id": "room2",  # 默认推荐豪华房间
-                        "recommended_room_name": "Deluxe Room",
-                        "explanation": "This room offers a good balance of comfort and amenities, including a king-sized bed and city view."
-                    }
+            if method == "GET":
+                response = requests.get(url, **request_kwargs)
+            elif method == "POST":
+                response = requests.post(url, **request_kwargs)
             else:
-                # 如果是字符串或其他格式
-                response_content = str(response)
-                try:
-                    recommendation = json.loads(response_content)
-                    return recommendation
-                except json.JSONDecodeError:
-                    import re
-                    json_match = re.search(r'\{[\s\S]*\}', response_content)
-                    if json_match:
-                        try:
-                            recommendation = json.loads(json_match.group(0))
-                            return recommendation
-                        except json.JSONDecodeError:
-                            logger.error("Failed to parse JSON from model response")
-                            return {"error": "Failed to parse recommendation"}
-                    else:
-                        logger.error("No JSON found in model response")
-                        return {"error": "No recommendation found"}
+                raise ValueError(f"Unsupported HTTP method: {method}")
+                
+            # 处理响应
+            if response.status_code == 200:
+                content_type = response.headers.get('Content-Type', '')
+                if 'application/json' in content_type:
+                    return response.json()
+                else:
+                    return {"content": response.text, "content_type": content_type}
+            else:
+                return {"error": f"HTTP error {response.status_code}", "content": response.text}
         except Exception as e:
-            logger.error(f"Error using model to recommend room: {e}")
-            return {"error": f"Error generating recommendation: {str(e)}"}
+            logging.error(f"Error fetching URL {url} with method {method}: {str(e)}")
+            return {"error": str(e)}
 
-    
-    def _handle_tool_calls(self, tool_calls: List, hotel_id: str, guest_preferences: str) -> Dict[str, Any]:
-        r"""Handle tool calls from the model response.
+    def handle_tool_call(self, tool_call: Any, messages: List[Dict]) -> None:
+        """处理工具调用"""
+        function_name = tool_call.function.name
+        function_args = json.loads(tool_call.function.arguments)
         
-        Args:
-            tool_calls (List): List of tool calls from the model response.
-            hotel_id (str): ID of the hotel.
-            guest_preferences (str): Guest preferences.
+        if function_name == "fetch_url":
+            url = function_args.get("url")
+            method = function_args.get("method", "GET")
+            data = function_args.get("data")
+            headers = function_args.get("headers")
             
-        Returns:
-            Dict[str, Any]: Results from handling the tool calls.
-        """
-        results = {}
-        
-        # 直接从工具调用中提取有用信息
-        for tool_call in tool_calls:
+            if url in self.visited_urls:
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tool_call.id,
+                    "content": json.dumps({
+                        "error": f"你已经访问过这个URL: {url}",
+                        "suggestion": "请尝试访问不同的URL，或者基于已有信息提供总结和建议。"
+                    }),
+                })
+                return
+            
+            random_id = str(uuid.uuid4())[:8]
+            self.add_progress_step(f'fetch_url_{random_id}', f'获取URL内容: {url}', 'in-progress', {'url': url})
+            
             try:
-                function_name = tool_call.function.name
-                function_args = json.loads(tool_call.function.arguments)
+                result = self.fetch_url_content(url, method=method, data=data, headers=headers)
+                logging.info(f"HTTP response [url: {url}]:")
+                logging.info(result)
+
+                self.visited_urls.add(url)
+                self.update_progress(f'fetch_url_{random_id}', 'completed')
                 
-                logger.debug(f"Processing tool call: {function_name} with args: {function_args}")
-                
-                # 从工具调用中提取信息
-                if function_name == "fetch_url":
-                    url = function_args.get("url")
-                    # 记录URL信息供分析
-                    results['url'] = url
-                    
-                    # 从URL中提取房间ID信息
-                    if "room_id" in url:
-                        room_id_match = re.search(r'room_id=([\w\d]+)', url)
-                        if room_id_match:
-                            room_id = room_id_match.group(1)
-                            results['room_id'] = room_id
-                            
-                # 从工具调用参数中提取信息
-                if 'room_id' in function_args:
-                    results['room_id'] = function_args.get('room_id')
-                if 'room_name' in function_args:
-                    results['room_name'] = function_args.get('room_name')
-                if 'preferences' in function_args:
-                    results['preferences'] = function_args.get('preferences')
-                if 'explanation' in function_args:
-                    results['explanation'] = function_args.get('explanation')
-                elif 'reason' in function_args:
-                    results['explanation'] = function_args.get('reason')
-                    
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tool_call.id,
+                    "content": json.dumps(result, ensure_ascii=False),
+                })
             except Exception as e:
-                logger.error(f"Error handling tool call: {e}")
+                logging.error(f"Error fetching URL {url}: {str(e)}")
+                self.update_progress(f'fetch_url_{random_id}', 'error')
                 
-        # 根据提取的房间ID确定房间名称（如果没有直接提供）
-        if 'room_id' in results and 'room_name' not in results:
-            room_id = results['room_id']
-            if room_id == "room1":
-                results['room_name'] = "Standard Room"
-            elif room_id == "room2":
-                results['room_name'] = "Deluxe Room"
-            elif room_id == "room3":
-                results['room_name'] = "Suite"
-            else:
-                # 如果是未知的房间ID，使用通用名称
-                results['room_name'] = f"Room {room_id}"
-                
-        # 如果没有找到房间ID，根据工具调用的内容推断
-        if 'room_id' not in results:
-            # 默认推荐豪华房间
-            results['room_id'] = 'room2'
-            results['room_name'] = 'Deluxe Room'
-                
-        # 确保有解释文本
-        if 'explanation' not in results:
-            results['explanation'] = f"Based on your preferences '{guest_preferences}', this room is recommended as it offers a good balance of comfort and value."
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tool_call.id,
+                    "content": json.dumps({
+                        "error": f"Failed to fetch URL: {url}",
+                        "message": str(e)
+                    }),
+                })
+
+    def process_user_input(self, user_input: str, task_type: str = "general") -> Dict[str, Any]:
+        """处理用户输入"""
+        logging.info(f"Starting to process user input for task type: {task_type}")
+        
+        try:
+            # 重置状态
+            self.progress_list.clear()
+            self.visited_urls.clear()
             
-        # 构建房间信息结果
-        if 'room_id' in results and 'room_name' in results:
-            results['room_info'] = {
-                "room_id": results['room_id'],
-                "room_name": results['room_name'],
-                "explanation": results.get('explanation', f"This room was selected based on your preferences: {guest_preferences}")
-            }
+            # 添加初始步骤
+            self.add_progress_step('create_agent', f'启动{task_type}搜索助手', 'in-progress')
+            self.add_progress_step('fetch_initial_url', '获取搜索智能体描述', 'in-progress', {'url': initial_url})
+            
+            # 获取初始URL内容
+            initial_content = self.fetch_url_content(initial_url)
+            self.visited_urls.add(initial_url)
+            self.update_progress('fetch_initial_url', 'completed')
+            
+            # 准备消息列表
+            messages = self.prepare_initial_messages(user_input, initial_content)
+            
+            # 处理对话
+            result = self.process_conversation(messages, task_type)
+            return result
+            
+        except Exception as e:
+            logging.error(f"Error processing user input: {str(e)}")
+            logging.error(traceback.format_exc())
+            for step in progress_list:
+                if step['status'] == 'in-progress':
+                    step['status'] = 'error'
+            raise e
+
+    def prepare_initial_messages(self, user_input: str, initial_content: Dict) -> List[Dict]:
+        """准备初始消息列表"""
+        formatted_prompt = SEARCH_AGENT_PROMPT_TEMPLATE.format(
+            task_description=user_input,
+            initial_url=initial_url
+        )
+        
+        return [
+            {"role": "system", "content": formatted_prompt},
+            {"role": "user", "content": user_input},
+            {"role": "system", "content": f"我已经获取了初始URL的内容。以下是搜索智能体的描述数据:\n\n```json\n{json.dumps(initial_content, ensure_ascii=False, indent=2)}\n```\n\n请分析这个数据，理解搜索智能体的功能和API用法。找出你需要访问的链接，通过fetch_url工具来获取更多信息，完成用户的任务。"}
+        ]
+
+    def process_conversation(self, messages: List[Dict], task_type: str) -> Dict[str, Any]:
+        """处理对话流程"""
+        max_iterations = 15
+        current_iteration = 0
+        
+        while current_iteration < max_iterations:
+            current_iteration += 1
+            logging.info(f"Starting iteration {current_iteration}/{max_iterations}")
+            
+            # 获取模型响应
+            completion = self.client.chat.completions.create(
+                model=os.getenv("AZURE_OPENAI_MODEL"),
+                messages=messages,
+                tools=AVAILABLE_TOOLS,
+                tool_choice="auto",
+            )
+            
+            response_message = completion.choices[0].message
+            messages.append({
+                "role": "assistant",
+                "content": response_message.content,
+                "tool_calls": response_message.tool_calls
+            })
+            
+            # 检查是否结束对话
+            if self.should_end_conversation(response_message, current_iteration, max_iterations):
+                self.update_progress('create_agent', 'completed')
+                return self.create_final_response(response_message, task_type)
                 
-        return results
-    
+            # 处理工具调用
+            for tool_call in response_message.tool_calls:
+                self.handle_tool_call(tool_call, messages)
+
+    def should_end_conversation(self, response_message: Any, current_iteration: int, max_iterations: int) -> bool:
+        """判断是否应该结束对话"""
+        if not response_message.tool_calls:
+            return True
+            
+        if current_iteration >= max_iterations - 1:
+            return True
+            
+        return False
+
+    def create_final_response(self, response_message: Any, task_type: str) -> Dict[str, Any]:
+        """创建最终响应"""
+        return {
+            "content": response_message.content,
+            "type": "text",
+            "visited_urls": list(self.visited_urls),
+            "task_type": task_type
+        }
+
+    def recommend_room_with_model_v2(self, question: str, guest_preferences: str = "") -> Dict[str, Any]:
+        """使用模型推荐酒店房间
+
+        Args:
+            question (str): 用户的酒店查询问题
+            guest_preferences (str, optional): 客人偏好. Defaults to "".
+
+        Returns:
+            Dict[str, Any]: 推荐结果
+        """
+        # 合并问题和偏好
+        if guest_preferences:
+            full_query = f"{question}\n客人偏好: {guest_preferences}"
+        else:
+            full_query = question
+            
+        logger.info(f"开始处理酒店查询: {full_query}")
+        
+        # 创建任务
+        task = {
+            "input": full_query,
+            "type": "hotel_booking"
+        }
+        
+        logger.info(f"\n=== 测试任务: {task['type']} ===")
+        logger.info(f"用户输入: {task['input']}")
+        
+        # 使用现有的 process_user_input 函数处理用户请求
+        try:
+            result = self.process_user_input(task['input'], task['type'])
+            
+            # 构建结果
+            response = {
+                "recommendation": result["content"],
+                "timestamp": datetime.now().isoformat(),
+                "query": full_query,
+                "visited_urls": result.get("visited_urls", [])
+            }
+            
+            logger.info("酒店推荐生成成功")
+            return response
+            
+        except Exception as e:
+            logger.error(f"生成酒店推荐时出错: {e}")
+            return {
+                "error": f"生成酒店推荐时出错: {str(e)}",
+                "query": full_query
+            }
+            
     def get_tools(self) -> List[FunctionTool]:
         r"""Returns a list of FunctionTool objects representing the functions in the toolkit.
         
@@ -363,5 +415,5 @@ class HotelToolkit(BaseToolkit):
             List[FunctionTool]: A list of FunctionTool objects representing the functions in the toolkit.
         """
         return [
-            FunctionTool(self.recommend_room_with_model),
+            FunctionTool(self.recommend_room_with_model_v2),
         ]
