@@ -1,8 +1,21 @@
 # 酒店查询示例使用说明
 
-## 简介
+## OWL 项目简介
 
-`run_hotel_example.py` 是一个演示脚本，用于展示如何使用 Owl 框架中的 `HotelToolkit` 进行酒店查询和推荐。该脚本使用 Azure OpenAI 服务来处理自然语言查询，并通过 `HotelToolkit` 提供的工具函数来获取酒店信息和推荐。
+🦉 OWL (Optimized Workforce Learning for General Multi-Agent Assistance in Real-World Task Automation) 是一个前沿的多智能体协作框架，旨在推动任务自动化的边界，构建在 [CAMEL-AI Framework](https://github.com/camel-ai/camel) 之上。OWL 通过利用动态智能体交互，实现了跨多领域更自然、高效且稳健的任务自动化。
+
+OWL 提供了多种核心功能，包括：
+- **在线搜索**：使用维基百科、谷歌搜索等，进行实时信息检索
+- **多模态处理**：支持互联网或本地视频、图片、语音处理
+- **浏览器操作**：借助Playwright框架开发浏览器模拟交互
+- **文件解析**：word、excel、PDF、PowerPoint信息提取
+- **代码执行**：编写python代码，并使用解释器运行
+
+## 酒店查询功能简介
+
+`run_hotel_example.py` 是基于 OWL 框架集成开发的一个演示脚本，专门用于展示如何使用 `HotelToolkit` 进行酒店查询和推荐。该功能是 OWL 项目的一个扩展应用，展示了如何将 OWL 的多智能体协作能力应用于特定领域的任务。
+
+该脚本使用 Azure OpenAI 服务来处理自然语言查询，并通过 `HotelToolkit` 提供的工具函数来获取酒店信息和推荐。通过这个示例，您可以了解如何将 OWL 框架应用于实际业务场景，以及如何开发自己的领域特定工具包。
 
 ## 前提条件
 
